@@ -18,6 +18,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/sql/privilege"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scerrors"
 	"github.com/cockroachdb/cockroach/pkg/sql/schemachanger/scpb"
+	"github.com/cockroachdb/cockroach/pkg/sql/sem/catid"
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlclustersettings"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlerrors"
@@ -386,6 +387,8 @@ func replaceFunction(
 		}
 	}
 
+	validateVolatilityForDependents(b, fnID, n.Name.Object(), volatility)
+
 	// Always replace all option sub-elements, even if using defaults.
 	b.Replace(&scpb.FunctionVolatility{
 		FunctionID: fnID,
@@ -438,6 +441,70 @@ func replaceFunction(
 // updateDependentTriggers finds all triggers that reference the given function
 // and updates their inlined function body and dependency tracking to reflect the
 // new function body.
+// validateVolatilityForDependents rejects a volatility weakening when the
+// function is referenced by an IMMUTABLE-requiring dependent (computed
+// column, expression index, or CHECK constraint).
+func validateVolatilityForDependents(
+	b BuildCtx, fnID catid.DescID, fnName string, newVolatility catpb.Function_Volatility,
+) {
+	if newVolatility == catpb.Function_IMMUTABLE {
+		return
+	}
+	backRefs := b.BackReferences(fnID)
+	refsFunction := func(ids []catid.DescID) bool {
+		for _, id := range ids {
+			if id == fnID {
+				return true
+			}
+		}
+		return false
+	}
+	var depDescID catid.DescID
+	backRefs.FilterColumnComputeExpression().ForEach(
+		func(_ scpb.Status, _ scpb.TargetStatus, e *scpb.ColumnComputeExpression) {
+			if depDescID == 0 && refsFunction(e.UsesFunctionIDs) {
+				depDescID = e.TableID
+			}
+		},
+	)
+	if depDescID == 0 {
+		backRefs.FilterCheckConstraint().ForEach(
+			func(_ scpb.Status, _ scpb.TargetStatus, e *scpb.CheckConstraint) {
+				if depDescID == 0 && refsFunction(e.UsesFunctionIDs) {
+					depDescID = e.TableID
+				}
+			},
+		)
+	}
+	if depDescID == 0 {
+		backRefs.FilterCheckConstraintUnvalidated().ForEach(
+			func(_ scpb.Status, _ scpb.TargetStatus, e *scpb.CheckConstraintUnvalidated) {
+				if depDescID == 0 && refsFunction(e.UsesFunctionIDs) {
+					depDescID = e.TableID
+				}
+			},
+		)
+	}
+	if depDescID == 0 {
+		backRefs.FilterSecondaryIndex().ForEach(
+			func(_ scpb.Status, _ scpb.TargetStatus, e *scpb.SecondaryIndex) {
+				if depDescID == 0 && e.EmbeddedExpr != nil && refsFunction(e.EmbeddedExpr.UsesFunctionIDs) {
+					depDescID = e.TableID
+				}
+			},
+		)
+	}
+	if depDescID == 0 {
+		return
+	}
+	ns := b.QueryByID(depDescID).FilterNamespace().MustGetOneElement()
+	panic(pgerror.Newf(
+		pgcode.DependentObjectsStillExist,
+		"cannot change volatility of function %q because it is referenced by table %q in a context requiring IMMUTABLE",
+		fnName, ns.Name,
+	))
+}
+
 func updateDependentTriggers(b BuildCtx, fnID descpb.ID, fnBodyStr string) {
 	backRefs := b.BackReferences(fnID)
 	backRefs.FilterTriggerFunctionCall().ForEach(

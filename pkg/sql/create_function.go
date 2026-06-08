@@ -269,6 +269,9 @@ func (n *createFunctionNode) replaceFunction(
 	if err := setFuncOptions(params, udfDesc, n.cf.Options); err != nil {
 		return err
 	}
+	if err := validateVolatilityForDependents(params.ctx, params.p, udfDesc); err != nil {
+		return err
+	}
 
 	// Removing all existing references before adding new references.
 	for _, id := range udfDesc.DependsOn {
@@ -669,6 +672,32 @@ func validateVolatilityInOptions(
 	}
 	if err := vp.Validate(); err != nil {
 		return sqlerrors.NewInvalidVolatilityError(err)
+	}
+	return nil
+}
+
+// validateVolatilityForDependents rejects a volatility weakening when the
+// function is referenced by an IMMUTABLE-requiring dependent (computed
+// column, expression index, or CHECK constraint).
+func validateVolatilityForDependents(
+	ctx context.Context, p *planner, udfDesc catalog.FunctionDescriptor,
+) error {
+	if udfDesc.GetVolatility() == catpb.Function_IMMUTABLE {
+		return nil
+	}
+	for _, ref := range udfDesc.GetDependedOnBy() {
+		if len(ref.ColumnIDs) == 0 && len(ref.IndexIDs) == 0 && len(ref.ConstraintIDs) == 0 {
+			continue
+		}
+		depDesc, err := p.Descriptors().ByIDWithoutLeased(p.txn).WithoutNonPublic().Get().Table(ctx, ref.ID)
+		if err != nil {
+			return err
+		}
+		return pgerror.Newf(
+			pgcode.DependentObjectsStillExist,
+			"cannot change volatility of function %q because it is referenced by table %q in a context requiring IMMUTABLE",
+			udfDesc.GetName(), depDesc.GetName(),
+		)
 	}
 	return nil
 }

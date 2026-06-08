@@ -826,7 +826,14 @@ func (b *Builder) buildScan(
 		// virtual columns.
 		proj := make(memo.ProjectionsExpr, 0, virtualColIDs.Len())
 		virtualColIDs.ForEach(func(col opt.ColumnID) {
-			item := b.factory.ConstructProjectionsItem(tabMeta.ComputedCols[col], col)
+			computedExpr := tabMeta.ComputedCols[col]
+			if computedExpr == nil {
+				panic(errors.WithHint(
+					errors.AssertionFailedf("virtual computed column has non-immutable expression"),
+					"a function referenced by this column may have been altered to non-IMMUTABLE volatility",
+				))
+			}
+			item := b.factory.ConstructProjectionsItem(computedExpr, col)
 			if !item.ScalarProps().OuterCols.SubsetOf(scanColIDs) {
 				panic(errors.AssertionFailedf("scanned virtual column depends on non-scanned column"))
 			}

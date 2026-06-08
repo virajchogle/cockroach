@@ -882,3 +882,70 @@ CREATE FUNCTION f_circle() RETURNS INT LANGUAGE SQL AS $$ SELECT a FROM t_circle
 
 statement error pgcode 42P13 pq: .*cannot add dependency from descriptor \d+ to function f_circle \(\d+\) because there will be a dependency cycle.*
 ALTER TABLE t_circle ALTER COLUMN b SET DEFAULT f_circle();
+
+# Verify that CREATE OR REPLACE FUNCTION refuses to weaken volatility when an
+# existing dependent uses the function in a context requiring IMMUTABLE.
+
+statement ok
+CREATE FUNCTION f_vol() RETURNS INT LANGUAGE SQL IMMUTABLE AS $$ SELECT 1 $$
+
+# Virtual computed column dependent.
+statement ok
+CREATE TABLE t_replace_vol_virt (a INT PRIMARY KEY, b INT AS (f_vol()) VIRTUAL)
+
+statement error pgcode 2BP01 cannot change volatility of function "f_vol" because it is referenced by table "t_replace_vol_virt"
+CREATE OR REPLACE FUNCTION f_vol() RETURNS INT LANGUAGE SQL VOLATILE AS $$ SELECT 2 $$
+
+statement error pgcode 2BP01 cannot change volatility of function "f_vol" because it is referenced by table "t_replace_vol_virt"
+CREATE OR REPLACE FUNCTION f_vol() RETURNS INT LANGUAGE SQL STABLE AS $$ SELECT 2 $$
+
+# Omitting the volatility option implicitly defaults to VOLATILE.
+statement error pgcode 2BP01 cannot change volatility of function "f_vol" because it is referenced by table "t_replace_vol_virt"
+CREATE OR REPLACE FUNCTION f_vol() RETURNS INT LANGUAGE SQL AS $$ SELECT 2 $$
+
+# Re-specifying IMMUTABLE preserves the invariant and is allowed.
+statement ok
+CREATE OR REPLACE FUNCTION f_vol() RETURNS INT LANGUAGE SQL IMMUTABLE AS $$ SELECT 3 $$
+
+statement ok
+DROP TABLE t_replace_vol_virt
+
+# Stored computed column dependent.
+statement ok
+CREATE TABLE t_replace_vol_stored (a INT PRIMARY KEY, b INT AS (f_vol()) STORED)
+
+statement error pgcode 2BP01 cannot change volatility of function "f_vol" because it is referenced by table "t_replace_vol_stored"
+CREATE OR REPLACE FUNCTION f_vol() RETURNS INT LANGUAGE SQL VOLATILE AS $$ SELECT 2 $$
+
+statement ok
+DROP TABLE t_replace_vol_stored
+
+# CHECK constraint dependent.
+statement ok
+CREATE TABLE t_replace_vol_check (a INT PRIMARY KEY, b INT, CHECK (b > f_vol()))
+
+statement error pgcode 2BP01 cannot change volatility of function "f_vol" because it is referenced by table "t_replace_vol_check"
+CREATE OR REPLACE FUNCTION f_vol() RETURNS INT LANGUAGE SQL VOLATILE AS $$ SELECT 2 $$
+
+statement ok
+DROP TABLE t_replace_vol_check
+
+# Expression index dependent.
+statement ok
+CREATE TABLE t_replace_vol_idx (a INT PRIMARY KEY, b INT)
+
+statement ok
+CREATE INDEX idx_replace_vol ON t_replace_vol_idx ((f_vol() + b))
+
+statement error pgcode 2BP01 cannot change volatility of function "f_vol" because it is referenced by table "t_replace_vol_idx"
+CREATE OR REPLACE FUNCTION f_vol() RETURNS INT LANGUAGE SQL VOLATILE AS $$ SELECT 2 $$
+
+statement ok
+DROP TABLE t_replace_vol_idx
+
+# Without IMMUTABLE-requiring dependents, the volatility can be freely changed.
+statement ok
+CREATE OR REPLACE FUNCTION f_vol() RETURNS INT LANGUAGE SQL VOLATILE AS $$ SELECT 2 $$
+
+statement ok
+DROP FUNCTION f_vol
