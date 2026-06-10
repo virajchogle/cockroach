@@ -438,9 +438,6 @@ func replaceFunction(
 	b.LogEventForExistingTarget(existingFnElem)
 }
 
-// updateDependentTriggers finds all triggers that reference the given function
-// and updates their inlined function body and dependency tracking to reflect the
-// new function body.
 // validateVolatilityForDependents rejects a volatility weakening when the
 // function is referenced by an IMMUTABLE-requiring dependent (computed
 // column, expression index, or CHECK constraint).
@@ -505,6 +502,9 @@ func validateVolatilityForDependents(
 	))
 }
 
+// updateDependentTriggers finds all triggers that reference the given function
+// and updates their inlined function body and dependency tracking to reflect the
+// new function body.
 func updateDependentTriggers(b BuildCtx, fnID descpb.ID, fnBodyStr string) {
 	backRefs := b.BackReferences(fnID)
 	backRefs.FilterTriggerFunctionCall().ForEach(
